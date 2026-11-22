@@ -10,7 +10,7 @@ import re
 
 from rapidfuzz import fuzz
 
-from .schemas import CartItem, CartResponse, Ingredient, ParsedDish, Product, Suggestion, UnmatchedItem
+from .schemas import CartItem, CartResponse, Ingredient, Line, ParsedDish, Product, Suggestion, UnmatchedItem
 from .substitutions import SUBSTITUTES
 
 MAX_SUGGESTIONS = 3
@@ -142,17 +142,22 @@ def build_cart(
     unmatched_items: list[UnmatchedItem] = []
     suggestions: list[Suggestion] = []
 
+    lines: list[Line] = []
+
     for ing in parsed.ingredients:
         if ing.name.lower().strip() in FREE_ITEMS:
             continue  # nothing to buy
-        if ing.name.lower() in pantry_l:
+        in_pantry = ing.name.lower() in pantry_l
+        item = _match_one(ing, scale, catalogue)
+        swaps = [] if item is not None else suggest(ing, scale, pantry, catalogue)
+        lines.append(make_line(ing, scale, item, swaps, in_pantry))
+        if in_pantry:
             skipped.append(ing.name)
             continue
-        item = _match_one(ing, scale, catalogue)
         if item is None:
             unmatched.append(ing.name)
             unmatched_items.append(describe_unmatched(ing, scale))
-            suggestions.extend(suggest(ing, scale, pantry, catalogue))
+            suggestions.extend(swaps)
         else:
             items.append(item)
 
@@ -163,7 +168,43 @@ def build_cart(
         unmatched=unmatched,
         unmatched_items=unmatched_items,
         suggestions=suggestions,
+        lines=lines,
+        servings=servings,
         total=round(sum(i.price for i in items), 2),
+    )
+
+
+def fmt_amount(value: float) -> str:
+    """500.0 -> '500', 2.5 -> '2.5'."""
+    value = round(value, 1)
+    return str(int(value)) if value == int(value) else str(value)
+
+
+def usage(amount: float, packs: int, pack_size: float, unit: str) -> tuple[int, str | None]:
+    """(percent of the bought packs the recipe uses, what's left over)."""
+    total = packs * pack_size
+    pct = min(100, max(1, round(amount / total * 100))) if amount > 0 else 0
+    left = total - amount
+    if left < 0.5:
+        return pct, None
+    return pct, (fmt_amount(left) if unit == "count" else f"{fmt_amount(left)} {unit}")
+
+
+def make_line(ing: Ingredient, scale: float, item: CartItem | None, swaps: list[Suggestion], in_pantry: bool) -> Line:
+    amount, unit = normalize(ing.quantity * scale, ing.unit)
+    common = dict(
+        name=ing.name,
+        need=f"{fmt_amount(amount)} {unit}",
+        need_amount=round(amount, 2),
+        need_unit=unit,
+        estimated=ing.estimated,
+        in_pantry=in_pantry,
+    )
+    if item is None:
+        return Line(**common, status="open", suggested_pack_size=suggest_pack_size(amount, unit), swaps=swaps)
+    return Line(
+        **common, status="priced", product=item.product, packs=item.packs, price=item.price,
+        used_pct=item.used_pct, left_over=item.left_over,
     )
 
 
@@ -193,8 +234,12 @@ def suggest(
 ) -> list[Suggestion]:
     """Stand-ins for an unmatched ingredient: pantry items first, then priced
     catalogue products that fit the ingredient's unit."""
-    key = max(SUBSTITUTES, key=lambda k: similarity(ing.name, k), default=None)
-    if key is None or similarity(ing.name, key) < MATCH_THRESHOLD:
+    # Match both ways, so "heavy cream" finds the "cream" rule and "cream" finds "coconut cream".
+    def score(k: str) -> float:
+        return max(similarity(ing.name, k), similarity(k, ing.name))
+
+    key = max(SUBSTITUTES, key=score, default=None)
+    if key is None or score(key) < MATCH_THRESHOLD:
         return []
     have, buy = [], []
     for sub_name, note in SUBSTITUTES[key]:
@@ -208,6 +253,7 @@ def suggest(
                 buy.append(Suggestion(
                     ingredient=ing.name, product=priced.product, note=note,
                     packs=priced.packs, price=priced.price,
+                    used_pct=priced.used_pct, left_over=priced.left_over,
                 ))
                 break
         else:
@@ -241,10 +287,13 @@ def _price(ing: Ingredient, scale: float, product: Product) -> CartItem | None:
     elif (base_unit == "count") != (product.unit == "count"):
         return None
     packs = packs_needed(amount, product.pack_size)
+    used_pct, left_over = usage(amount, packs, product.pack_size, product.unit)
     return CartItem(
         ingredient=ing.name,
         needed=f"{round(amount, 1)} {base_unit}",
         product=product.name,
         packs=packs,
         price=round(packs * product.price, 2),
+        used_pct=used_pct,
+        left_over=left_over,
     )

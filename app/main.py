@@ -9,13 +9,14 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 from sqlmodel import Session  # noqa: E402
 
 from . import video_fetch  # noqa: E402
 from .admin import router as catalogue_router  # noqa: E402
 from .db import get_session, load_catalogue  # noqa: E402
-from .dishcache import parse_cached  # noqa: E402
+from .dishcache import dish_key, get_cached, parse_cached  # noqa: E402
 from .limits import MediaLimit, media_slot  # noqa: E402
 from .matcher import build_cart  # noqa: E402
 from .parser import (  # noqa: E402
@@ -37,6 +38,9 @@ app.include_router(catalogue_router)
 
 STATIC = Path(__file__).resolve().parent / "static"
 CHUNK = 1024 * 1024
+MIN_AUTO_INGREDIENTS = 3  # fewer than this from a fetched caption/audio/video = a teaser, not a recipe
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 def get_catalogue(session: Session = Depends(get_session)) -> list[Product]:
@@ -105,7 +109,9 @@ def recipe_from_media(ref: ReelRef, caption: str | None) -> ParsedDish | None:
             transcript = transcribe(got.path)
             if transcript:
                 try:
-                    return parse_recipe_text(compose_post(caption, transcript))
+                    parsed = parse_recipe_text(compose_post(caption, transcript))
+                    if len(parsed.ingredients) >= MIN_AUTO_INGREDIENTS:
+                        return parsed
                 except NoRecipeError:
                     pass
             if not video_fetch.video_fallback_enabled():
@@ -115,13 +121,33 @@ def recipe_from_media(ref: ReelRef, caption: str | None) -> ParsedDish | None:
             if got is None:
                 return None
         try:  # muxed file from the first request, or the fallback download
-            return parse_recipe_video(got.path)
+            parsed = parse_recipe_video(got.path)
+            return parsed if len(parsed.ingredients) >= MIN_AUTO_INGREDIENTS else None
         except NoRecipeError:
             return None
 
 
-def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str]:
-    """Dish name -> parse by name; reel link and/or pasted text -> parse the text."""
+KEY_SOURCES = {"ig:": "instagram", "vid:": "video", "text:": "text"}
+
+
+def rebuild_from_key(key: str, session: Session) -> tuple[ParsedDish, str, str]:
+    """Re-use an already-parsed recipe (change servings, re-price) without re-reading
+    the source. Reel / video / text recipes only exist in the cache."""
+    for prefix, source in KEY_SOURCES.items():
+        if key.startswith(prefix):
+            parsed = get_cached(session, key)
+            if parsed is None:
+                raise LookupError("This recipe isn't saved any more - please start again.")
+            return parsed, source, key
+    parsed, _ = parse_cached(session, key, parse_dish, is_builtin=is_builtin, model=current_model())
+    return parsed, "dish", key
+
+
+def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str, str]:
+    """Returns (recipe, source, recipe_key). Dish name -> parse by name; reel link
+    and/or pasted text -> parse the text; recipe_key -> the saved recipe."""
+    if req.recipe_key:
+        return rebuild_from_key(req.recipe_key, session)
     ref = find_reel(req.dish)
     pasted = (req.caption or "").strip() or None
 
@@ -130,7 +156,7 @@ def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str]
             session, req.dish, parse_dish,
             refresh=req.refresh, is_builtin=is_builtin, model=current_model(),
         )
-        return parsed, "dish"
+        return parsed, "dish", dish_key(req.dish)
 
     def from_text(_: str) -> ParsedDish:
         caption = pasted
@@ -138,7 +164,12 @@ def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str]
             caption = fetch_caption(ref)
         if caption:
             try:
-                return parse_recipe_text(caption)
+                parsed = parse_recipe_text(caption)
+                # A fetched caption that yields only one or two ingredients is usually a teaser
+                # ("the secret was the garam..."), not a recipe. Don't present that as the
+                # answer: look at the audio/video, or ask. Text the user pasted is taken as given.
+                if pasted is not None or len(parsed.ingredients) >= MIN_AUTO_INGREDIENTS:
+                    return parsed
             except NoRecipeError:
                 if pasted is not None:
                     raise  # the user gave us the text and there's no recipe in it
@@ -146,6 +177,7 @@ def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str]
             parsed = recipe_from_media(ref, caption)
             if parsed is not None:
                 return parsed
+            raise NeedsCaption("We couldn't find a recipe in that post's caption or audio.")
         if caption:
             raise NeedsCaption("The reel's caption doesn't seem to contain a recipe.")
         raise NeedsCaption("Instagram wouldn't show us that reel's caption.")
@@ -154,12 +186,15 @@ def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str]
     parsed, _ = parse_cached(
         session, req.dish, from_text, refresh=req.refresh, key=key, model=current_model()
     )
-    return parsed, "instagram" if ref else "text"
+    return parsed, "instagram" if ref else "text", key
 
 
-def finish_cart(parsed: ParsedDish, source: str, servings: int, pantry: list[str], catalogue: list[Product]) -> CartResponse:
-    cart = build_cart(parsed, servings, pantry, catalogue)
+def finish_cart(
+    parsed: ParsedDish, source: str, key: str, servings: int | None, pantry: list[str], catalogue: list[Product]
+) -> CartResponse:
+    cart = build_cart(parsed, servings or parsed.base_servings, pantry, catalogue)
     cart.source = source
+    cart.recipe_key = key
     return cart
 
 
@@ -170,10 +205,10 @@ def create_cart(
     session: Session = Depends(get_session),
 ) -> CartResponse:
     try:
-        parsed, source = resolve_recipe(req, session)
+        parsed, source, key = resolve_recipe(req, session)
     except Exception as e:
         raise to_http(e)
-    return finish_cart(parsed, source, req.servings, req.pantry, catalogue)
+    return finish_cart(parsed, source, key, req.servings, req.pantry, catalogue)
 
 
 # --- video upload ----------------------------------------------------------
@@ -216,13 +251,13 @@ def _save_upload(upload: UploadFile, dest: Path) -> tuple[Path, str]:
 def create_cart_from_video(
     request: Request,
     file: UploadFile = File(...),
-    servings: int = Form(4),
+    servings: int | None = Form(None),
     pantry: str = Form(""),
     refresh: bool = Form(False),
     catalogue: list[Product] = Depends(get_catalogue),
     session: Session = Depends(get_session),
 ) -> CartResponse:
-    if servings < 1:
+    if servings is not None and servings < 1:
         raise HTTPException(422, "servings must be at least 1.")
     try:
         declared = int(request.headers.get("content-length", 0))
@@ -242,4 +277,4 @@ def create_cart_from_video(
     except Exception as e:
         raise to_http(e)
     items = [p.strip() for p in pantry.split(",") if p.strip()]
-    return finish_cart(parsed, "video", servings, items, catalogue)
+    return finish_cart(parsed, "video", key, servings, items, catalogue)

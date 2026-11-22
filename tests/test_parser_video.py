@@ -232,3 +232,27 @@ def test_parse_recipe_video_accepts_an_injected_completer(tmp_path):
 
     assert parse_recipe_video(tmp_path / "never_read.mp4", complete=complete).dish == "dal"
     assert seen[0][0] == SYSTEM_VIDEO
+
+
+# --- has_recipe ------------------------------------------------------------
+
+def test_a_source_the_model_says_has_no_recipe_is_rejected_even_with_ingredients():
+    from app.parser import parse_recipe_text
+
+    teaser = '{"has_recipe": false, "dish": "pad kaprao", "base_servings": 4, "ingredients": [{"name": "beef", "quantity": 500, "unit": "g", "estimated": true}]}'
+    with pytest.raises(NoRecipeError):
+        parse_recipe_text("the best pad kaprao ever, recipe soon", complete=lambda s, u: teaser)
+
+
+def test_video_and_text_prompts_make_the_model_decide_has_recipe_first():
+    for system in (SYSTEM_TEXT, SYSTEM_VIDEO):
+        assert '"has_recipe": bool' in system
+        assert "FIRST decide" in system and "teaser" in system
+        assert '{"has_recipe": false' in system  # the empty reply carries the flag
+
+
+def test_recipes_saved_before_the_flag_existed_still_load():
+    from app.schemas import ParsedDish
+
+    old = '{"dish":"x","base_servings":2,"ingredients":[{"name":"a","quantity":1,"unit":"g"}]}'
+    assert ParsedDish.model_validate_json(old).has_recipe is True

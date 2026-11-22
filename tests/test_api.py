@@ -51,3 +51,14 @@ def test_cart_reports_what_each_unmatched_ingredient_needs(client_factory, seede
     assert body["unmatched_items"] == [
         {"name": "saffron", "needed": "10.0 ml", "unit": "ml", "suggested_pack_size": 50.0}
     ]
+
+
+def test_front_end_assets_are_served_and_linked(client_factory, engine):
+    client = client_factory(engine)
+    index = client.get("/").text
+    assert "/static/styles.css" in index and "/static/app.js" in index
+    css = client.get("/static/styles.css")
+    js = client.get("/static/app.js")
+    assert css.status_code == 200 and "--chilli" in css.text
+    assert js.status_code == 200 and "javascript" in js.headers["content-type"]
+    assert "/static/styles.css" in client.get("/catalogue").text

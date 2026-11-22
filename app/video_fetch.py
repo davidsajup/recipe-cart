@@ -72,7 +72,9 @@ def build_options(workdir: Path, audio_only: bool, stop: threading.Event) -> dic
         "retries": 1,
         "max_filesize": max_mb() * 1024 * 1024,
         "allowed_extractors": ["Instagram"],
-        "match_filter": match_filter_func(f"duration <= {max_seconds()} & !is_live"),
+        # "<=?" lets a missing duration through: Instagram often doesn't report one. The size
+        # cap and the wall-clock timeout still bound the download.
+        "match_filter": match_filter_func(f"duration <=? {max_seconds()} & !is_live"),
         "progress_hooks": [hook],
         # deliberately NO cookies / username / password
     }

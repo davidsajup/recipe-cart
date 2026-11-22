@@ -115,8 +115,12 @@ def _extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end > start else text
 
 
+def _norm(dish: str) -> str:
+    return " ".join(dish.lower().split())
+
+
 def is_builtin(dish: str) -> bool:
-    return dish.lower().strip() in SAMPLES
+    return _norm(dish) in SAMPLES
 
 
 def current_model() -> str:
@@ -124,7 +128,7 @@ def current_model() -> str:
 
 
 def parse_dish(dish: str, complete: Completer | None = None) -> ParsedDish:
-    data = SAMPLES.get(dish.lower().strip())
+    data = SAMPLES.get(_norm(dish))
     if data is not None:
         return ParsedDish.model_validate(data)
 
@@ -136,11 +140,22 @@ class NoRecipeError(Exception):
 
 
 _RULES = """Reply with ONLY a JSON object, no prose or code fences, shaped like:
-{"dish": str, "base_servings": int, "ingredients": [
+{"has_recipe": bool, "dish": str, "base_servings": int, "ingredients": [
   {"name": str, "quantity": number > 0,
    "unit": one of "g","kg","ml","l","tsp","tbsp","cup","count",
-   "staple": bool}]}
+   "staple": bool, "estimated": bool}]}
 Rules:
+- FIRST decide "has_recipe". It is true ONLY if the source actually gives the ingredients
+  used to cook the dish (listed, spoken or shown on screen). It is false if the source just
+  talks ABOUT a dish: a teaser, a review, a story, a "how to make it is coming" or "recipe in
+  the comments" post, or an ingredient mentioned only as an aside or an example. When
+  has_recipe is false, reply exactly the empty result at the end.
+- "estimated" is true ONLY when the source does not state that quantity and you
+  guessed it; false when the source states it.
+- Only list ingredients the source actually mentions or shows. Never add ingredients
+  from your own knowledge of how the dish is usually made.
+- A teaser, review or story that names a dish but does not give its ingredients is NOT
+  a recipe: reply with the empty result below.
 - "dish" is the name of the dish; "base_servings" is the serving count stated,
   otherwise 4.
 - Write ingredient names in English as simple generic names (e.g. "onion",
@@ -149,7 +164,7 @@ Rules:
 - Set staple=true for pantry basics such as salt, oil, sugar, common spices.
 - Ignore hashtags, @mentions, emojis, sponsorships and calls to follow/like.
 - If there is no recipe or ingredients, reply exactly
-  {"dish": "", "base_servings": 4, "ingredients": []}"""
+  {"has_recipe": false, "dish": "", "base_servings": 4, "ingredients": []}"""
 
 SYSTEM_TEXT = (
     """You extract a grocery ingredient list from a recipe post, such as an
@@ -178,7 +193,7 @@ MAX_POST_CHARS = 8000
 
 
 def _finish(parsed: ParsedDish, what: str) -> ParsedDish:
-    if not parsed.ingredients:
+    if not parsed.has_recipe or not parsed.ingredients:
         raise NoRecipeError(f"No recipe or ingredients found in that {what}.")
     if not parsed.dish.strip():
         parsed = parsed.model_copy(update={"dish": "recipe from post"})

@@ -43,3 +43,14 @@ def test_retry_once_then_succeed():
 def test_fails_after_retry():
     with pytest.raises(ValueError):
         parse_dish("dal", complete=fake("nope", '{"dish": "dal"}'))
+
+
+def test_builtin_dish_matches_whatever_the_spacing_or_case():
+    from app.parser import is_builtin
+
+    def boom(*a):
+        raise AssertionError("LLM should not be called")
+
+    for name in ("fish molee", "  Fish   MOLEE ", "FISH\tMOLEE"):
+        assert is_builtin(name)
+        assert parse_dish(name, complete=boom).dish == "fish molee"

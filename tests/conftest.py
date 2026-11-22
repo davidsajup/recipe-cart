@@ -47,6 +47,9 @@ def _isolate_media_settings(monkeypatch):
 
     for name in ("VIDEO_DOWNLOAD", "VIDEO_FALLBACK", "MAX_VIDEO_MB", "MAX_VIDEO_SECONDS", "VIDEO_MAX_PER_DAY"):
         monkeypatch.delenv(name, raising=False)
+    # Tests must never spend real Gemini quota: a leaked call fails authentication fast.
+    monkeypatch.setenv("GEMINI_API_KEY", "invalid-key-for-tests")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     limits.reset()
     yield
     limits.reset()

@@ -67,12 +67,37 @@ ever passed to yt-dlp, restricted to its Instagram extractor. Uploaded/downloade
 sent to Google Gemini; tell your users. Beta limits: 2 media jobs at once and
 `VIDEO_MAX_PER_DAY` (default 30) per process, in memory only.
 
+## The app ("mise en place")
+Open http://127.0.0.1:8000. Paste a reel link or name a dish, then **check what you have**:
+
+- Every ingredient is a line in recipe order with a **Buy | Have** toggle. Tapping Have drops it
+  out of the cart and the total updates instantly. What you have is remembered in your browser
+  (localStorage) for next time; "Forget" clears it.
+- Quantities the source didn't state are marked in **yellow** (the model flags them as
+  `estimated`). Dish-name recipes are typical amounts and aren't marked.
+- Each priced line has a **pack gauge**: how much of the bought pack(s) the recipe uses and
+  what's left over (grams and millilitres are treated as interchangeable, as in the matcher).
+- Ingredients the catalogue can't supply stay in place with a dashed outline. **Price it** opens a
+  prefilled form; **Swap for** suggests stand-ins you stock.
+- The servings stepper re-prices instantly from the saved recipe (no new AI call). A new recipe
+  starts at its own serving count.
+- **Copy shopping list** puts a plain-text list on the clipboard (items you have are left out).
+- Phone layout: cards, thumb-sized controls and a pinned total bar.
+
+API additions behind it (the older `items` / `unmatched` / `suggestions` fields are unchanged):
+`/cart` returns `lines` (one per ingredient, recipe order: `status` priced|open, `estimated`,
+`used_pct`, `left_over`, `swaps`, ...), `servings` and a `recipe_key`. Send that key back as
+`recipe_key` to re-price without re-reading the source; `servings` is optional.
+
+The front end is plain JS + CSS in `app/static/` (`app.js`, `styles.css`); fonts load from Google
+Fonts at runtime.
+
 ## Adding missing ingredients
-Ingredients the catalogue can't supply are listed under the cart with what's needed and an
-"Add to catalogue" button. It opens a form prefilled with a name, a realistic pack size
-(the smallest usual shelf size that covers the recipe) and the unit; you enter the price,
-and the cart rebuilds with the new product included (from the saved recipe, no new AI
-call). If `ADMIN_TOKEN` is set, the page asks for it once per browser session.
+Ingredients the catalogue can't supply stay in the list with a **Price it** button. It opens a
+form prefilled with a name, a realistic pack size (the smallest usual shelf size that covers the
+recipe) and the unit; you enter the price, and the cart rebuilds with the new product included
+(from the saved recipe, no new AI call). If `ADMIN_TOKEN` is set, the page asks for it once per
+browser session.
 
 ## Substitutions
 When an ingredient isn't in the catalogue, `/cart` returns `suggestions`: stand-ins

@@ -74,6 +74,9 @@ def test_duration_and_live_filter(tmp_path, monkeypatch):
     assert accept({"duration": 30, "is_live": False}) is None  # None = download it
     assert accept({"duration": 61, "is_live": False}) is not None
     assert accept({"duration": 30, "is_live": True}) is not None
+    # Instagram often reports no duration at all: that must not block the download
+    assert accept({"is_live": False}) is None
+    assert accept({}) is None
 
 
 def test_audio_stream_is_not_flagged_as_video(tmp_path):

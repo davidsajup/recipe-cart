@@ -17,6 +17,7 @@ RECIPE = {
     "ingredients": [
         {"name": "toor dal", "quantity": 200, "unit": "g"},
         {"name": "onion", "quantity": 2, "unit": "count"},
+        {"name": "cumin", "quantity": 1, "unit": "tsp"},
     ],
 }
 SPEECH = "Chop two onions, fry them with cumin and then add the boiled toor dal."
@@ -382,3 +383,61 @@ def test_a_bad_api_key_is_not_reported_as_a_corrupt_file(client, media, monkeypa
     monkeypatch.setattr(main, "parse_recipe_video", boom)
     r = upload(client, mp4())
     assert r.status_code == 503 and "API key not valid" in r.json()["detail"]
+
+
+# --- thin captions (teasers) -----------------------------------------------
+
+TEASER = {"dish": "pad kaprow", "base_servings": 4, "ingredients": [{"name": "garam masala", "quantity": 1, "unit": "tsp", "estimated": True}]}
+
+
+def test_a_teaser_caption_is_not_presented_as_the_recipe(client, media):
+    media["caption"] = "the best pad kaprow ever, the secret might have been the garam..."
+    media["text_recipe"] = TEASER  # the model "finds" a single ingredient in the teaser
+    r = post(client)
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "needs_caption"
+    assert "doesn't seem to contain a recipe" in r.json()["detail"]["message"]
+
+
+def test_a_teaser_caption_falls_through_to_the_audio_when_downloads_are_on(client, media, enabled, monkeypatch):
+    media["caption"] = "the secret might have been the garam..."
+    full = ParsedDish.model_validate(RECIPE)
+
+    def parse_text(text):
+        media["texts"].append(text)
+        # the caption alone is a teaser; caption + transcript is a real recipe
+        return full if "Spoken transcript" in text else ParsedDish.model_validate(TEASER)
+
+    monkeypatch.setattr(main, "parse_recipe_text", parse_text)
+    r = post(client)
+    assert r.status_code == 200 and len(r.json()["lines"]) == 3
+    assert media["downloads"] == ["audio"] and media["transcribed"] == ["media.m4a"]
+
+
+def test_text_the_user_pasted_is_taken_as_given_even_if_short(client, media):
+    media["text_recipe"] = TEASER
+    r = post(client, caption="just garam masala")
+    assert r.status_code == 200 and len(r.json()["lines"]) == 1
+
+
+def test_a_thin_transcript_does_not_become_a_recipe(client, media, enabled):
+    """A teaser video: the model 'finds' one ingredient in the speech. That's not a recipe."""
+    media["text_recipe"] = TEASER
+    media["video_recipe"] = TEASER
+    r = post(client)
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "needs_caption"
+    assert media["downloads"] == ["audio", "video"]  # it still tried the video before giving up
+
+
+def test_the_prompts_forbid_inventing_ingredients():
+    from app.parser import SYSTEM_TEXT, SYSTEM_VIDEO
+
+    for system in (SYSTEM_TEXT, SYSTEM_VIDEO):
+        assert "Never add ingredients" in system and "teaser" in system
+
+
+def test_message_names_the_audio_when_it_was_checked_too(client, media, enabled):
+    media["caption"] = "teaser"
+    media["text_recipe"] = None
+    media["video_recipe"] = None
+    detail = post(client).json()["detail"]
+    assert detail["code"] == "needs_caption" and "caption or audio" in detail["message"]
