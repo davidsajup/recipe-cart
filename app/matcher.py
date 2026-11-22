@@ -53,7 +53,7 @@ FREE_ITEMS = {"water", "ice", "hot water", "warm water", "cold water", "ice wate
 PIECE_WEIGHT_G = {
     "onion": 150, "tomato": 120, "potato": 150, "carrot": 70,
     "green chilli": 5, "garlic": 5,  # garlic = one clove
-    "lemon": 60, "ginger": 30,
+    "lemon": 60, "ginger": 30, "chicken breast": 200,
 }
 
 _NOISE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|pack|pcs|x)?\b")

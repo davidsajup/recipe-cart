@@ -70,6 +70,19 @@ class UnmatchedItem(BaseModel):
     suggested_pack_size: float
 
 
+class Alternative(BaseModel):
+    """Another variant the customer could choose for a line (provider carts only)."""
+
+    label: str
+    size_text: str
+    packs: int = 0
+    price: float = 0
+    used_pct: int | None = None
+    left_over: str | None = None
+    priced: bool = True  # False: shown for you to choose, but we couldn't work out packs/price
+    offer: dict  # opaque ids the cart call needs
+
+
 class Line(BaseModel):
     """One ingredient of the recipe, in recipe order, priced or not."""
 
@@ -87,6 +100,10 @@ class Line(BaseModel):
     left_over: str | None = None
     suggested_pack_size: float | None = None  # for open lines: prefill for "add to catalogue"
     swaps: list[Suggestion] = []  # for open lines: stand-ins
+    # Provider carts only (None / empty for the built-in catalogue):
+    provider: str | None = None
+    offer: dict | None = None  # opaque ids of the chosen variant
+    alternatives: list[Alternative] = []
 
 
 class CartResponse(BaseModel):
@@ -100,6 +117,8 @@ class CartResponse(BaseModel):
     lines: list[Line] = []
     recipe_key: str = ""  # send back as CartRequest.recipe_key to rebuild without re-reading
     servings: int = 4
+    provider: str = "catalogue"
+    provider_badge: str = ""  # attribution text the UI must show next to this provider's results
     total: float
 
 

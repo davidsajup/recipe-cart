@@ -24,6 +24,33 @@ Open http://127.0.0.1:8000 for the UI (API docs at /docs). "fish molee" works
 without a key; other dishes are parsed by Gemini (`RECIPE_CART_MODEL` in `.env`
 changes the model).
 
+## Providers (Swiggy Instamart adapter)
+`app/providers/` lets the cart be priced from a live grocery provider instead of the built-in
+catalogue. **It is a library for now: nothing in the API or UI calls it yet**, because Instamart
+needs each customer to sign in with their own Swiggy account (OAuth 2.1 + PKCE), which needs
+user accounts, token storage and HTTPS first.
+
+- `base.py` provider-neutral `Offer` / `Location` / `Provider`; `quantity.py` reads pack sizes
+  from free text ("500 g", "2 x 250 g", "Pack of 6", "1 L"); unreadable sizes are shown to the
+  customer but never priced on a guess.
+- `instamart.py` JSON-RPC client for Swiggy's MCP endpoint, written from their builder docs:
+  results from `structuredContent`; errors mapped (401 -> sign in again, 400, 429 with
+  Retry-After, 5xx, `success:false`); retries 500 ms doubling, 5 attempts, 30 s budget; **placing
+  an order is never auto-retried**; the token and arguments are never logged. Addresses, search
+  and cart building only. Checkout and UPI payment wait for a customer confirmation screen.
+- `cart.py` builds the same `CartResponse` as the catalogue (same pack gauges, leftovers and
+  unmatched handling), one search per distinct ingredient, respecting the provider's own ranking,
+  with priced alternatives per line. `selections_from_cart` turns lines into cart items.
+- `own.py` wraps the built-in catalogue as a provider (a test proves it prices identically).
+- `fake_instamart.py` an offline stand-in built from the documented shapes. **Its products and
+  size strings are invented**: Swiggy's docs publish no sample responses, so capture real ones
+  from staging before trusting the pack-size parser.
+
+Set `SWIGGY_MCP_BASE_URL` to point at another endpoint (default: staging, `/im`). Swiggy's rules
+that shape the product: show "Powered by Instamart" with every result and cart, let the customer
+choose variants and confirm before any order, don't scrape the catalogue, don't persist personal
+data longer than needed.
+
 ## Dish cache
 Dishes parsed by Gemini are saved in the `parsed_dishes` table (keyed by the
 lower-cased dish name), so asking for the same dish again is instant and free;
