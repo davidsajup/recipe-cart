@@ -38,3 +38,15 @@ def client_factory():
 
     yield make
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_media_settings(monkeypatch):
+    """Never let a developer's .env (or an earlier test) change media behaviour."""
+    from app import limits
+
+    for name in ("VIDEO_DOWNLOAD", "VIDEO_FALLBACK", "MAX_VIDEO_MB", "MAX_VIDEO_SECONDS", "VIDEO_MAX_PER_DAY"):
+        monkeypatch.delenv(name, raising=False)
+    limits.reset()
+    yield
+    limits.reset()

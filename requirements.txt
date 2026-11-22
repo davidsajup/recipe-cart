@@ -9,3 +9,5 @@ rapidfuzz
 sqlmodel
 alembic
 psycopg[binary]
+yt-dlp
+python-multipart

@@ -65,9 +65,11 @@ def parse_cached(
     refresh: bool = False,
     is_builtin: Callable[[str], bool] = lambda _: False,
     model: str = "",
+    key: str | None = None,
 ) -> tuple[ParsedDish, bool]:
-    """Return (parsed, from_cache). A cache failure never fails the request."""
-    key = dish_key(dish)
+    """Return (parsed, from_cache). A cache failure never fails the request.
+    `key` overrides the dish-name key (used for reel ids / pasted text)."""
+    key = key or dish_key(dish)
     if not refresh and not is_builtin(dish):
         try:
             hit = get_cached(session, key)

@@ -38,6 +38,7 @@ class CartRequest(BaseModel):
     servings: int = Field(default=4, gt=0)
     pantry: list[str] = []
     refresh: bool = False  # ignore the saved parse and ask the model again
+    caption: str | None = Field(default=None, max_length=20000)  # pasted recipe text / reel caption
 
 
 class Suggestion(BaseModel):
@@ -55,6 +56,7 @@ class CartResponse(BaseModel):
     skipped_pantry: list[str]
     unmatched: list[str]
     suggestions: list[Suggestion] = []
+    source: Literal["dish", "instagram", "text", "video"] = "dish"
     total: float
 
 
