@@ -69,6 +69,12 @@ class FakeInstamart:
     calls: list[tuple[str, dict]] = field(default_factory=list)   # (tool, arguments)
     cart: list[dict] = field(default_factory=list)                # [{"spinId","skuId","quantity"}]
     queue: list = field(default_factory=list)                     # injected failures, FIFO
+    tool_failures: dict = field(default_factory=dict)             # tool name -> [http status, ...]
+    orders: dict = field(default_factory=dict)                    # orderId -> order
+    payments: dict = field(default_factory=dict)                  # paasId -> {"orderId", "polls", "confirmed"}
+    polls_to_success: int = 2                                     # UPI "succeeds" on this many polls
+    _order_n: int = 0
+    _last_snapshot: str | None = None                             # for the duplicate-order guard
 
     # ---- failure injection ----
     def fail_next(self, status: int = 503, *, headers: dict | None = None, jsonrpc_code: int | None = None, times: int = 1):
@@ -91,6 +97,8 @@ class FakeInstamart:
         params = body["params"]
         tool, args = params["name"], params.get("arguments", {})
         self.calls.append((tool, args))
+        if self.tool_failures.get(tool):
+            return httpx.Response(self.tool_failures[tool].pop(0), json={"error": {"message": "injected"}})
         handler = getattr(self, f"_tool_{tool}", None)
         if handler is None:
             return httpx.Response(400, json={"error": {"message": f"Invalid tool {tool}"}})
@@ -161,6 +169,82 @@ class FakeInstamart:
         self.cart = []
         return {"verified": True}
 
+    # ---- payment and orders (shapes from the checkout / pay-with-upi docs) ----
+    def _tool_get_payment_options(self, args):
+        view = self._cart_view()
+        return {
+            "platforms": {"mobile": {"methods": [{"id": "upi_intent", "displayName": "UPI app"}]}, "desktop": {"methods": [{"id": "upi_qr", "displayName": "Scan QR"}]}},
+            "cod": {"available": True, "id": "cod", "displayName": "Cash"},
+            "swiggyMoney": {"available": False, "id": "swiggy_money", "displayName": "Swiggy Money"},
+            "allMethods": [
+                {"id": "upi_intent", "groupName": "UPI", "displayName": "UPI", "kind": "upi"},
+                {"id": "cod", "groupName": "Cash", "displayName": "Cash on delivery", "kind": "cod"},
+            ],
+            "paymentAmount": view["billBreakdown"]["toPay"]["value"],
+            "placeOrderToolName": "checkout",
+        }
+
+    def _tool_checkout(self, args):
+        if not self.cart:
+            raise _Domain("Your cart is empty.")
+        if args.get("addressId") not in {a["id"] for a in self.addresses}:
+            raise _Bad("Invalid addressId")
+        method = args.get("paymentMethod") or "Cash"
+        if method not in ("UPI", "Cash", "COD", "SwiggyPay"):
+            raise _Bad("Invalid paymentMethod")
+        if method == "SwiggyPay":
+            raise _Domain("Swiggy Money isn't available for this account.")
+        snapshot = json.dumps(self.cart, sort_keys=True)
+        if snapshot == self._last_snapshot and not args.get("confirmDuplicate"):
+            raise _Domain("This looks like a duplicate of your last order. Confirm to place it again.")
+        view = self._cart_view()
+        to_pay = view["billBreakdown"]["toPay"]["value"]
+        if float(to_pay) < 99:
+            raise _Domain("Minimum order not met (cart under 99).")
+        self._order_n += 1
+        order_id = f"ord_{self._order_n}"
+        address = next(a for a in self.addresses if a["id"] == args["addressId"])
+        base = {"orderId": order_id, "paymentMethod": method if method != "COD" else "Cash", "cartTotal": to_pay,
+                "addressId": address["id"], "deliveryAddress": address["addressLine"], "deliveryLabel": address.get("addressCategory", "")}
+        if method == "UPI":
+            paas = f"paas_{self._order_n}"
+            self.payments[paas] = {"orderId": order_id, "polls": 0, "confirmed": False}
+            self.orders[order_id] = {**base, "status": "PENDING_PAYMENT"}
+            return {**base, "paymentMethod": "UPI", "status": "PENDING_PAYMENT", "paasId": paas, "transactionId": f"txn_{self._order_n}",
+                    "bridgeUrl": f"https://pay.example/demo/{paas}", "upiIntentUrl": f"upi://pay?pa=demo&am={to_pay}",
+                    "isQrFlow": bool(args.get("generateUPIQR")), "pollingIntervalInMs": 1500, "maxTimeToPollForInMs": 20000}
+        self.orders[order_id] = {**base, "status": "PLACED"}
+        self._finish_order()
+        return {**base, "status": "PLACED"}
+
+    def _tool_check_payment_status(self, args):
+        pay = self.payments.get(args.get("paasId"))
+        if not pay:
+            raise _Bad("Invalid paasId")
+        pay["polls"] += 1
+        done = pay["polls"] >= self.polls_to_success
+        return {"paasId": args["paasId"], "status": "success" if done else "pending", "terminal": done,
+                "isTerminalSuccess": done, "isTerminalFailure": False, "confirmed": pay["confirmed"], "orderId": pay["orderId"]}
+
+    def _tool_confirm_order(self, args):
+        pay = self.payments.get(args.get("paasId"))
+        if not pay or pay["orderId"] != args.get("orderId"):
+            raise _Bad("Invalid orderId or paasId")
+        if pay["polls"] < self.polls_to_success:
+            raise _Domain("Payment hasn't completed yet.")
+        pay["confirmed"] = True
+        self.orders[pay["orderId"]]["status"] = "PLACED"
+        self._finish_order()
+        return {"orderId": pay["orderId"], "paasId": args["paasId"], "orderStatus": "PLACED", "result": "success"}
+
+    def _tool_get_orders(self, args):
+        return {"orders": [{"orderId": o["orderId"], "status": o["status"], "paymentMethod": o["paymentMethod"], "totalAmount": o["cartTotal"]}
+                           for o in self.orders.values()], "hasMore": False}
+
+    def _finish_order(self):
+        self._last_snapshot = json.dumps(self.cart, sort_keys=True)
+        self.cart = []
+
     def _cart_view(self) -> dict:
         items, total = [], 0.0
         for c in self.cart:
@@ -178,6 +262,9 @@ class FakeInstamart:
         fee = 0 if total >= 199 else 15
         return {
             "cartId": "cart_1", "items": items, "cartTotalAmount": f"{total:g}",
+            "selectedAddress": self.addresses[0]["id"] if self.addresses else None,
+            "selectedAddressDetails": ({"id": self.addresses[0]["id"], "address": self.addresses[0]["addressLine"], "area": "Bengaluru",
+                                        "name": "Demo customer", "mobile": "9XXXXXXXX0"} if self.addresses else None),
             "billBreakdown": {
                 "lineItems": [{"label": "Item total", "value": f"{total:g}"}, {"label": "Handling fee", "value": f"{fee:g}"}],
                 "toPay": {"label": "To pay", "value": f"{total + fee:g}"},

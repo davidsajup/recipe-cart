@@ -13,12 +13,14 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 from sqlmodel import Session  # noqa: E402
 
-from . import video_fetch  # noqa: E402
+from . import demo, video_fetch  # noqa: E402
 from .admin import router as catalogue_router  # noqa: E402
 from .db import get_session, load_catalogue  # noqa: E402
+from .demo_api import router as demo_router  # noqa: E402
 from .dishcache import dish_key, get_cached, parse_cached  # noqa: E402
 from .limits import MediaLimit, media_slot  # noqa: E402
 from .matcher import build_cart  # noqa: E402
+from .providers.cart import build_provider_cart  # noqa: E402
 from .parser import (  # noqa: E402
     NoRecipeError,
     compose_post,
@@ -35,6 +37,7 @@ from .video_fetch import download_reel  # noqa: E402
 
 app = FastAPI(title="Recipe Cart")
 app.include_router(catalogue_router)
+app.include_router(demo_router)
 
 STATIC = Path(__file__).resolve().parent / "static"
 CHUNK = 1024 * 1024
@@ -51,6 +54,11 @@ def get_catalogue(session: Session = Depends(get_session)) -> list[Product]:
     if not catalogue:
         raise HTTPException(status_code=503, detail="Catalogue is empty - run `python -m app.seed`.")
     return catalogue
+
+
+@app.get("/api/config", include_in_schema=False)
+def config() -> dict:
+    return {"demo_instamart": demo.enabled()}
 
 
 @app.get("/", include_in_schema=False)
@@ -190,9 +198,16 @@ def resolve_recipe(req: CartRequest, session: Session) -> tuple[ParsedDish, str,
 
 
 def finish_cart(
-    parsed: ParsedDish, source: str, key: str, servings: int | None, pantry: list[str], catalogue: list[Product]
+    parsed: ParsedDish, source: str, key: str, servings: int | None, pantry: list[str], catalogue: list[Product],
+    provider: str = "catalogue",
 ) -> CartResponse:
-    cart = build_cart(parsed, servings or parsed.base_servings, pantry, catalogue)
+    n = servings or parsed.base_servings
+    if provider == "instamart":
+        if not demo.enabled():
+            raise HTTPException(400, "Instamart isn't connected yet.")
+        cart = build_provider_cart(parsed, n, demo.provider(), demo.LOCATION, pantry)
+    else:
+        cart = build_cart(parsed, n, pantry, catalogue)
     cart.source = source
     cart.recipe_key = key
     return cart
@@ -208,7 +223,10 @@ def create_cart(
         parsed, source, key = resolve_recipe(req, session)
     except Exception as e:
         raise to_http(e)
-    return finish_cart(parsed, source, key, req.servings, req.pantry, catalogue)
+    try:
+        return finish_cart(parsed, source, key, req.servings, req.pantry, catalogue, req.provider)
+    except Exception as e:
+        raise to_http(e)
 
 
 # --- video upload ----------------------------------------------------------

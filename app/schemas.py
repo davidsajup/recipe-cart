@@ -48,6 +48,8 @@ class CartRequest(BaseModel):
     # Rebuild from an already-parsed recipe (change servings, re-price) without re-reading
     # the source. Comes from a previous response's recipe_key.
     recipe_key: str | None = Field(default=None, max_length=200)
+    # Where prices come from. "instamart" is demo-only until real sign-in exists.
+    provider: Literal["catalogue", "instamart"] = "catalogue"
 
 
 class Suggestion(BaseModel):

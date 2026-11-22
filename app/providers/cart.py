@@ -110,6 +110,15 @@ def build_provider_cart(
     )
 
 
+def offer_from_ref(ref: dict, *, name: str = "", price: float = 0.0) -> Offer:
+    """Rebuild an Offer from the opaque ids that travelled to the browser and back."""
+    return Offer(
+        provider=ref["provider"], product_id=ref.get("product_id", ""), variant_id=ref["variant_id"],
+        sku_id=ref["sku_id"], name=name, brand="", size_text=ref.get("size_text", ""),
+        price=price, mrp=None, in_stock=True, max_quantity=ref.get("max_quantity"),
+    )
+
+
 def selections_from_cart(cart: CartResponse, have: set[str] | None = None) -> list[Selection]:
     """The variants to put in the provider's cart: every priced line you're buying, at the
     number of packs the maths came to. (Not yet wired to a customer confirmation screen.)"""
@@ -118,12 +127,6 @@ def selections_from_cart(cart: CartResponse, have: set[str] | None = None) -> li
     for line in cart.lines:
         if line.status != "priced" or line.name.lower() in have or not line.offer:
             continue
-        ref = line.offer
-        offer = Offer(
-            provider=ref["provider"], product_id=ref["product_id"], variant_id=ref["variant_id"],
-            sku_id=ref["sku_id"], name=line.product or "", brand="", size_text=ref.get("size_text", ""),
-            price=round(line.price / max(line.packs, 1), 2), mrp=None, in_stock=True,
-            max_quantity=ref.get("max_quantity"),
-        )
+        offer = offer_from_ref(line.offer, name=line.product or "", price=round(line.price / max(line.packs, 1), 2))
         out.append(Selection(offer=offer, quantity=line.packs))
     return out

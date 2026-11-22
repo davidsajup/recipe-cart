@@ -26,9 +26,10 @@ changes the model).
 
 ## Providers (Swiggy Instamart adapter)
 `app/providers/` lets the cart be priced from a live grocery provider instead of the built-in
-catalogue. **It is a library for now: nothing in the API or UI calls it yet**, because Instamart
-needs each customer to sign in with their own Swiggy account (OAuth 2.1 + PKCE), which needs
-user accounts, token storage and HTTPS first.
+catalogue. **Real Instamart access is not connected**: it needs approval from Swiggy and each
+customer signing in with their own Swiggy account (OAuth 2.1 + PKCE), which needs user accounts,
+token storage and HTTPS first. What exists today is the adapter plus a **demo mode** (below) that
+runs the whole customer flow against a simulated Instamart.
 
 - `base.py` provider-neutral `Offer` / `Location` / `Provider`; `quantity.py` reads pack sizes
   from free text ("500 g", "2 x 250 g", "Pack of 6", "1 L"); unreadable sizes are shown to the
@@ -37,7 +38,9 @@ user accounts, token storage and HTTPS first.
   results from `structuredContent`; errors mapped (401 -> sign in again, 400, 429 with
   Retry-After, 5xx, `success:false`); retries 500 ms doubling, 5 attempts, 30 s budget; **placing
   an order is never auto-retried**; the token and arguments are never logged. Addresses, search
-  and cart building only. Checkout and UPI payment wait for a customer confirmation screen.
+  and cart building, plus **guarded** checkout and UPI payment: `checkout` refuses unless the
+  customer explicitly confirmed, re-reads the cart and refuses if the amount they saw changed,
+  and is never retried; the UPI poll confirms the order exactly once.
 - `cart.py` builds the same `CartResponse` as the catalogue (same pack gauges, leftovers and
   unmatched handling), one search per distinct ingredient, respecting the provider's own ranking,
   with priced alternatives per line. `selections_from_cart` turns lines into cart items.
@@ -45,6 +48,19 @@ user accounts, token storage and HTTPS first.
 - `fake_instamart.py` an offline stand-in built from the documented shapes. **Its products and
   size strings are invented**: Swiggy's docs publish no sample responses, so capture real ones
   from staging before trusting the pack-size parser.
+
+### Demo mode (simulated Instamart)
+Set `DEMO_INSTAMART=1` and restart. The start screen gets a **Prices from** switch
+(Our catalogue | Instamart demo). With Instamart selected you get the full customer flow, so you
+can record the demo video Swiggy asks for with their application:
+suggested product per ingredient with a **Change** picker (other sizes and brands, including ones
+whose size we couldn't read and that you must check yourself), a **Review order** screen
+(items and prices as the provider sees them, bill, delivery address, UPI or cash, and the sentence
+"Your order will be delivered to ... You'll pay ... by ..."), a **Place order** button, UPI
+polling and an order-placed screen. "Powered by Instamart" appears on every screen and a "Demo"
+banner makes clear nothing is real. The demo shares ONE in-memory cart and order list across the
+whole server, so use it for a single presenter only. No real order is ever placed. The brand
+mark is a placeholder; use Swiggy's official logo asset per their brand guidelines before launch.
 
 Set `SWIGGY_MCP_BASE_URL` to point at another endpoint (default: staging, `/im`). Swiggy's rules
 that shape the product: show "Powered by Instamart" with every result and cart, let the customer

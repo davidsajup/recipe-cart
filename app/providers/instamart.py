@@ -77,6 +77,14 @@ class Unavailable(SwiggyError):
     """5xx, timeouts, dropped connections."""
 
 
+class ConfirmationRequired(SwiggyError):
+    """checkout was attempted without the customer's explicit yes. Never place an order silently."""
+
+
+class CartChanged(SwiggyError):
+    """The cart no longer matches what the customer reviewed (price, stock or address changed)."""
+
+
 def base_url() -> str:
     return os.environ.get("SWIGGY_MCP_BASE_URL", DEFAULT_BASE_URL)
 
@@ -247,6 +255,43 @@ class CartResult:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class Confirmation:
+    """What the customer explicitly agreed to. Swiggy's rule: always get a clear yes to the
+    items, the total, the delivery address and the payment method before `checkout`."""
+
+    to_pay: str          # the amount they were shown
+    address_id: str
+    payment_method: str  # "UPI" | "Cash" | "SwiggyPay"
+    confirmed: bool      # they said yes
+
+
+@dataclass
+class OrderOutcome:
+    status: str                      # "placed" | "pending_payment" | "partial"
+    order_ids: list[str]
+    payment_method: str
+    message: str
+    total: str | None = None
+    delivery_address: str | None = None
+    paas_id: str | None = None       # UPI only: poll check_payment_status with this
+    bridge_url: str | None = None    # UPI only: opaque HTTPS page with the scan / open-app UI
+    upi_intent_url: str | None = None
+    poll_interval_ms: int | None = None
+    max_poll_ms: int | None = None
+    failed: int = 0
+
+
+@dataclass
+class PaymentStatus:
+    status: str                      # "pending" | "success" | "failed"
+    order_id: str | None = None
+    message: str = ""
+
+
+PAYMENT_METHODS = ("UPI", "Cash", "SwiggyPay")
+
+
 class InstamartProvider:
     name = NAME
     badge = BADGE
@@ -282,8 +327,96 @@ class InstamartProvider:
     def clear_cart(self) -> None:
         self.client.call("clear_cart", {})
 
+    # ---- ordering (guarded) ----------------------------------------------
+    def payment_options(self) -> list[dict]:
+        """Only offer what Swiggy returns. Never ask for a UPI ID."""
+        data = self.client.call("get_payment_options", {})
+        seen, out = set(), []
+        for m in data.get("allMethods") or []:
+            group = m.get("groupName") or m.get("displayName")
+            if group in PAYMENT_METHODS and group not in seen:
+                seen.add(group)
+                out.append({"id": group, "label": m.get("displayName") or group})
+        return out
+
+    def checkout(self, confirmation: Confirmation, *, confirm_duplicate: bool = False) -> OrderOutcome:
+        """Place the order. Refuses unless the customer confirmed what is in the cart NOW.
+        Never retried automatically: after a failure, look at the orders list first."""
+        if not confirmation.confirmed:
+            raise ConfirmationRequired("Please confirm your order before we place it.")
+        if confirmation.payment_method not in PAYMENT_METHODS:
+            raise BadRequest("Choose a payment method.")
+        cart = self.get_cart()
+        if cart.raw.get("cartAbsent"):
+            raise CartChanged("Your cart is empty. Please review it again.")
+        if cart.unserviceable:
+            raise CartChanged("Some items can't be delivered to this address. Please review your cart again.")
+        if not _same_amount(cart.to_pay, confirmation.to_pay):
+            raise CartChanged("The price changed since you reviewed your cart. Please review it again.")
+        args: dict = {"addressId": confirmation.address_id, "paymentMethod": confirmation.payment_method}
+        if confirm_duplicate:
+            args["confirmDuplicate"] = True
+        return outcome_from(self.client.call("checkout", args, retry=False))
+
+    def payment_status(self, paas_id: str, order_id: str) -> PaymentStatus:
+        """One UPI poll. When Swiggy reports success but hasn't confirmed the order, confirm it
+        exactly once (the docs: confirm_order is idempotent for the same ids)."""
+        data = self.client.call("check_payment_status", {"paasId": paas_id, "orderId": order_id})
+        if data.get("isTerminalFailure") or data.get("status") in ("failed", "cancelled", "refund-initiated", "cart_changed"):
+            return PaymentStatus("failed", order_id, "The payment didn't go through. No order was placed.")
+        if not data.get("isTerminalSuccess"):
+            return PaymentStatus("pending", order_id, "Waiting for your payment...")
+        if data.get("confirmed"):
+            return PaymentStatus("success", order_id, "Instamart order placed successfully.")
+        try:
+            res = self.client.call("confirm_order", {"orderId": order_id, "paasId": paas_id}, retry=False)
+        except Unavailable:
+            return PaymentStatus("pending", order_id, "Confirming your order...")
+        result = res.get("result")
+        if result == "success":
+            return PaymentStatus("success", order_id, "Instamart order placed successfully.")
+        if result == "failed":
+            return PaymentStatus("failed", order_id, "The order couldn't be completed.")
+        return PaymentStatus("pending", order_id, "Confirming your order...")
+
 
 # ---- shape conversion -----------------------------------------------------
+
+def _same_amount(a: str | None, b: str | None) -> bool:
+    """'113' == '113.00' == 'Rs 113'. Falls back to exact text if neither reads as a number."""
+    def num(x):
+        digits = "".join(ch for ch in str(x or "") if ch.isdigit() or ch == ".")
+        try:
+            return float(digits)
+        except ValueError:
+            return None
+
+    na, nb = num(a), num(b)
+    return (na is not None and nb is not None and abs(na - nb) < 0.005) or (na is None and nb is None and a == b)
+
+
+def outcome_from(data: dict) -> OrderOutcome:
+    """checkout data has three shapes: one order, several (one per store), or UPI pending."""
+    if "orders" in data:  # multi-store
+        ok = [o["orderId"] for o in data["orders"] if o.get("orderId") and not o.get("error")]
+        failed = len(data["orders"]) - len(ok)
+        return OrderOutcome(
+            status="placed" if data.get("allSucceeded") else "partial", order_ids=ok,
+            payment_method=data.get("paymentMethod", ""), total=data.get("cartTotal"), failed=failed,
+            message="Instamart order placed successfully." if not failed else f"{len(ok)} of {len(data['orders'])} orders were placed.",
+        )
+    base = dict(
+        order_ids=[data["orderId"]] if data.get("orderId") else [], payment_method=data.get("paymentMethod", ""),
+        total=data.get("cartTotal"), delivery_address=data.get("deliveryAddress"),
+    )
+    if data.get("status") == "PENDING_PAYMENT":
+        return OrderOutcome(
+            status="pending_payment", message="Waiting for your payment...", paas_id=data.get("paasId"),
+            bridge_url=data.get("bridgeUrl"), upi_intent_url=data.get("upiIntentUrl"),
+            poll_interval_ms=data.get("pollingIntervalInMs"), max_poll_ms=data.get("maxTimeToPollForInMs"), **base,
+        )
+    return OrderOutcome(status="placed", message="Instamart order placed successfully.", **base)
+
 
 def _num(value) -> float | None:
     try:

@@ -45,11 +45,15 @@ def _isolate_media_settings(monkeypatch):
     """Never let a developer's .env (or an earlier test) change media behaviour."""
     from app import limits
 
-    for name in ("VIDEO_DOWNLOAD", "VIDEO_FALLBACK", "MAX_VIDEO_MB", "MAX_VIDEO_SECONDS", "VIDEO_MAX_PER_DAY"):
+    for name in ("VIDEO_DOWNLOAD", "VIDEO_FALLBACK", "MAX_VIDEO_MB", "MAX_VIDEO_SECONDS", "VIDEO_MAX_PER_DAY", "DEMO_INSTAMART"):
         monkeypatch.delenv(name, raising=False)
     # Tests must never spend real Gemini quota: a leaked call fails authentication fast.
     monkeypatch.setenv("GEMINI_API_KEY", "invalid-key-for-tests")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    from app import demo
+
     limits.reset()
+    demo.reset()
     yield
     limits.reset()
+    demo.reset()

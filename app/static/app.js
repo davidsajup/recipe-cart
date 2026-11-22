@@ -79,6 +79,12 @@ const state = {
   forms: new Map(),       // line key -> add-to-catalogue form values
   listBusy: false,
   focus: null,            // selector to focus after the next render
+  config: {},             // from /api/config
+  provider: "catalogue",  // "catalogue" | "instamart" (demo)
+  picker: new Set(),      // line keys whose product picker is open
+  review: null,           // the order review screen's data
+  reviewBusy: false,
+  order: null,            // the placed / pending order
 };
 const keyOf = (name) => name.trim().toLowerCase();
 
@@ -97,7 +103,7 @@ function errorText(d, status) {
 }
 
 function cartBody(extra) {
-  return JSON.stringify(Object.assign({ pantry: [...state.have] }, extra));
+  return JSON.stringify(Object.assign({ pantry: [...state.have], provider: state.provider }, extra));
 }
 function postCart(extra) {
   return request("/cart", { method: "POST", headers: { "Content-Type": "application/json" }, body: cartBody(extra) });
@@ -108,6 +114,8 @@ function showCart(data) {
   state.servings = data.servings;
   state.alert = null;
   state.swapped.clear();
+  state.picker.clear();
+  state.provider = data.provider || "catalogue";
   if (state.view !== "recipe") { state.view = "recipe"; history.pushState({ view: "recipe" }, ""); }
 }
 
@@ -144,11 +152,28 @@ async function rebuild() {
   state.listBusy = true; render();
   const r = await postCart({ dish: state.cart.dish, recipe_key: state.cart.recipe_key, servings: state.servings });
   state.listBusy = false;
-  if (r.ok) { const keep = new Map(state.swapped); showCart(r.data); for (const [k, v] of keep) if (r.data.lines.some((l) => keepSwap(l, k))) state.swapped.set(k, v); }
+  if (r.ok) { const keep = new Map(state.swapped); showCart(r.data); reapplyPicks(keep, r.data.lines); }
   else toast(r.error);
   render();
 }
 const keepSwap = (line, k) => keyOf(line.name) === k && line.status === "open";
+
+// After a re-price (new servings) keep what the customer chose, with the new pack counts.
+function reapplyPicks(keep, lines) {
+  for (const [k, pick] of keep) {
+    const line = lines.find((l) => keyOf(l.name) === k);
+    if (!line) continue;
+    if (!pick.picked) { if (keepSwap(line, k)) state.swapped.set(k, pick); continue; }   // a catalogue swap
+    const vid = pick.offer && pick.offer.variant_id;
+    if (line.offer && line.offer.variant_id === vid) continue;                           // back to the suggestion
+    const alt = (line.alternatives || []).find((a) => a.offer.variant_id === vid);
+    if (alt) state.swapped.set(k, pickFromAlt(alt));
+  }
+}
+function pickFromAlt(a) {
+  return { product: a.label, packs: a.priced ? a.packs : 1, price: a.price, used_pct: a.priced ? a.used_pct : null,
+           left_over: a.priced ? a.left_over : null, offer: a.offer, picked: true, unsure: !a.priced };
+}
 
 let servingsTimer;
 function changeServings(n) {
@@ -181,7 +206,7 @@ export function summarize(lines, have, swapped) {
   const rows = lines.map((l) => {
     const key = keyOf(l.name);
     const sw = swapped.get(key);
-    const eff = sw ? Object.assign({}, l, { status: "priced", product: sw.product, packs: sw.packs, price: sw.price, used_pct: sw.used_pct, left_over: sw.left_over, swappedFor: sw }) : l;
+    const eff = sw ? Object.assign({}, l, { status: "priced", product: sw.product, packs: sw.packs, price: sw.price, used_pct: sw.used_pct, left_over: sw.left_over, offer: sw.offer || l.offer, unsure: !!sw.unsure, swappedFor: sw }) : l;
     return Object.assign({}, eff, { key, isHave: have.has(key) });
   });
   let total = 0, priced = 0, open = 0, haveN = 0;
@@ -191,6 +216,11 @@ export function summarize(lines, have, swapped) {
     else open++;
   }
   return { rows, total: Math.round(total * 100) / 100, priced, open, haveN };
+}
+
+// What would go to the provider's cart: lines you're buying that have a chosen product.
+export function orderItems(sum) {
+  return sum.rows.filter((r) => !r.isHave && r.status === "priced" && r.offer).map((r) => ({ offer: r.offer, quantity: r.packs }));
 }
 
 export function listText(cart, sum) {
@@ -261,12 +291,19 @@ function startView() {
     h("label", { for: "video", class: "btn btn--link", style: "min-height:36px;display:inline-flex;align-items:center" }, "upload a video"), "/",
     h("button", { type: "button", class: "btn btn--link", onClick: () => { state.moreOpen = !state.moreOpen; state.focus = state.moreOpen ? "#caption" : null; render(); } }, "paste a caption"));
 
+  const providerRow = state.config.demo_instamart ? h("div", { class: "src__provider" },
+    h("span", { class: "src__label", id: "prov" }, "Prices from"),
+    h("div", { class: "toggle toggle--wide", role: "group", "aria-labelledby": "prov" },
+      ...[["catalogue", "Our catalogue"], ["instamart", "Instamart (demo)"]].map(([id, label]) =>
+        h("button", { type: "button", class: "toggle__btn", "aria-pressed": String(state.provider === id), disabled: state.busy,
+          onClick: () => { state.provider = id; try { localStorage.setItem("rc.provider", id); } catch { /* ignore */ } render(); } }, label)))) : null;
+
   const form = h("form", { class: "src", id: "src-form", novalidate: true, onSubmit: (e) => { e.preventDefault(); build(); } },
     h("label", { class: "src__label", for: "src" }, "Reel link or dish name"),
     h("div", { class: "src__bar" }, input, pasteBtn, h("button", { id: "go", type: "submit", class: "btn btn--primary", disabled: state.busy }, state.busy ? "Working..." : "Build my cart")),
     hint,
     state.alert ? h("div", { class: "alert" + (state.alert.kind === "error" ? " alert--error" : ""), role: "alert" }, state.alert.text) : null,
-    fileInput, tryRow, more,
+    fileInput, tryRow, providerRow, more,
     state.busy ? h("div", { class: "loading" }, h("div", { class: "loading__bar" }), h("div", { class: "loading__text" }, state.busyText)) : null);
 
   return [
@@ -352,16 +389,60 @@ function recipeView() {
           h("button", { type: "button", class: "btn btn--link", onClick: backToStart }, "Change source"))),
       stepper),
     legend,
-    h("div", { class: "grid" }, h("div", { class: "grid__main" }, hint, list), cartPanel(sum, anyEstimated, cart.source)),
+    h("div", { class: "grid" }, h("div", { class: "grid__main" }, brandBar(cart), hint, list), cartPanel(sum, anyEstimated, cart)),
   ];
 }
 
-function backToStart() { state.view = "start"; state.alert = null; render(); window.scrollTo(0, 0); }
+function brandBar(cart) {
+  if (cart.provider !== "instamart") return null;
+  return h("div", { class: "brandbar" },
+    h("span", { class: "brandbar__logo", "aria-hidden": "true" }, "i"),   // placeholder: use Swiggy's official logo asset
+    h("strong", {}, cart.provider_badge || "Powered by Instamart"),
+    h("span", { class: "demo-pill" }, "Demo: simulated data"),
+    h("span", { class: "brandbar__text" }, "Prices and availability come from Instamart."));
+}
+
+function backToStart() {
+  clearTimeout(payTimer);
+  state.view = "start"; state.alert = null; state.review = null; state.order = null;
+  render(); window.scrollTo(0, 0);
+}
 
 function toggle(r) {
   return h("div", { class: "toggle", role: "group", "aria-label": `Buy or have ${r.name}` },
     h("button", { type: "button", class: "toggle__btn", "aria-pressed": String(!r.isHave), onClick: () => setHave(r.name, false) }, "Buy"),
     h("button", { type: "button", class: "toggle__btn", "aria-pressed": String(r.isHave), onClick: () => setHave(r.name, true) }, "Have"));
+}
+
+// The variants the customer can pick between for a line: the suggestion first, then alternatives.
+function optionsFor(r) {
+  const base = state.cart.lines.find((l) => keyOf(l.name) === r.key);
+  if (!base || state.cart.provider === "catalogue") return [];
+  const opts = [];
+  if (base.status === "priced" && base.offer) {
+    opts.push({ label: base.product, size_text: base.offer.size_text, packs: base.packs, price: base.price, used_pct: base.used_pct,
+                left_over: base.left_over, offer: base.offer, priced: true, suggested: true });
+  }
+  return opts.concat(base.alternatives || []);
+}
+
+function pickerEl(r, opts) {
+  const cur = r.offer && r.offer.variant_id;
+  return h("div", { class: "alts", role: "list", "aria-label": `Choose a product for ${r.name}` },
+    h("div", { class: "alts__title" }, r.status === "priced" ? "Choose another size or brand" : "Choose a product"),
+    opts.map((o) => h("div", { class: "alt", role: "listitem" },
+      h("div", { class: "alt__main" },
+        h("div", { class: "alt__name" }, o.label, o.suggested ? h("span", { class: "alt__tag" }, "Suggested") : null),
+        h("div", { class: "alt__meta" }, o.priced
+          ? `${o.packs} \u00d7 ${o.size_text} \u00b7 uses ${o.used_pct ?? 0}%` + (o.left_over ? ` \u00b7 ${o.left_over} left` : "")
+          : "We couldn't work out how much you need. Check the amount; 1 pack is added.")),
+      h("div", { class: "alt__price" }, o.price.toFixed(2)),
+      cur && o.offer.variant_id === cur
+        ? h("span", { class: "alt__selected" }, icon("check", 14), "Selected")
+        : h("button", { type: "button", class: "btn btn--small", onClick: () => {
+            if (o.suggested) state.swapped.delete(r.key); else state.swapped.set(r.key, pickFromAlt(o));
+            state.picker.delete(r.key); render();
+          } }, "Choose"))));
 }
 
 function rowEl(r) {
@@ -375,16 +456,23 @@ function rowEl(r) {
     mid = h("div", { class: "mid mid__have" }, icon("check", 18), "On your shelf. Not in the cart.");
     amt = r.status === "priced" ? h("div", { class: "amt amt--struck" }, r.price.toFixed(2)) : h("div", { class: "amt amt--none" }, "--");
   } else if (open) {
-    mid = h("div", { class: "mid mid__open" }, h("b", {}, "Not in your catalogue yet"),
-      h("button", { type: "button", class: "btn btn--small", onClick: () => openForm(r) }, icon("plus", 14), "Price it"));
+    const provider = state.cart.provider !== "catalogue";
+    mid = h("div", { class: "mid mid__open" }, h("b", {}, provider ? "No match found yet" : "Not in your catalogue yet"),
+      provider ? null : h("button", { type: "button", class: "btn btn--small", onClick: () => openForm(r) }, icon("plus", 14), "Price it"));
     amt = h("div", { class: "amt amt--none" }, "--");
   } else {
-    const pct = r.used_pct ?? 0;
+    const pct = r.used_pct;
+    const picked = r.swappedFor && r.swappedFor.picked;
     mid = h("div", { class: "mid" },
       h("div", { class: "mid__product" }, r.product, " ", h("span", { class: "mid__packs" }, `×${r.packs}`)),
-      h("div", { class: "gauge", role: "img", "aria-label": `Uses ${pct}% of the pack` }, h("div", { class: "gauge__fill", style: `width:${pct}%` })),
-      h("div", { class: "mid__uses" }, `uses ${pct}%` + (r.left_over ? ` · ${r.left_over} left` : "")),
-      r.swappedFor ? h("div", { class: "mid__swapped" }, `Swapped in for ${r.name}. `, h("button", { type: "button", class: "btn btn--link", style: "min-height:auto;padding:0", onClick: () => { state.swapped.delete(r.key); render(); } }, "Undo")) : null);
+      pct == null ? null : h("div", { class: "gauge", role: "img", "aria-label": `Uses ${pct}% of the pack` }, h("div", { class: "gauge__fill", style: `width:${pct}%` })),
+      pct == null ? null : h("div", { class: "mid__uses" }, `uses ${pct}%` + (r.left_over ? ` · ${r.left_over} left` : "")),
+      r.swappedFor ? h("div", { class: "mid__swapped" },
+        picked ? (r.unsure ? "Your choice. Check the amount: 1 pack added. " : "Your choice. ") : `Swapped in for ${r.name}. `,
+        h("button", { type: "button", class: "btn btn--link", style: "min-height:auto;padding:0", onClick: () => { state.swapped.delete(r.key); render(); } }, "Undo")) : null,
+      optionsFor(r).length > 1 ? h("button", { type: "button", class: "btn btn--link mid__change", "aria-expanded": String(state.picker.has(r.key)),
+        onClick: () => { if (state.picker.has(r.key)) state.picker.delete(r.key); else state.picker.add(r.key); render(); } },
+        state.picker.has(r.key) ? "Close" : "Change") : null);
     amt = h("div", { class: "amt" }, r.price.toFixed(2));
   }
 
@@ -394,9 +482,11 @@ function rowEl(r) {
       ? h("button", { type: "button", class: "swap swap--have", title: s.note, onClick: () => setHave(r.name, true) }, icon("check", 14), `${s.product} (you have it)`)
       : h("button", { type: "button", class: "swap", title: s.note, onClick: () => { state.swapped.set(r.key, s); render(); } }, s.product + (s.packs > 1 ? ` ×${s.packs}` : ""), h("b", {}, s.price.toFixed(2))))) : null;
 
+  const opts = !r.isHave ? optionsFor(r) : [];
+  const showPicker = opts.length && (open ? true : state.picker.has(r.key));
   return h("li", { class: cls, "data-row": r.key },
     toggle(r), h("div", { class: "who" }, h("div", { class: "who__name" }, r.name), h("div", { class: "who__need" }, need)), mid, amt,
-    open && !r.isHave && form ? formEl(r, form) : null, swaps);
+    open && !r.isHave && form ? formEl(r, form) : null, swaps, showPicker ? pickerEl(r, opts) : null);
 }
 
 // ---- add to catalogue, in place ----
@@ -440,7 +530,9 @@ function field(label, cls, control) {
   return h("div", { class: "field " + cls }, h("label", { for: id }, label), control);
 }
 
-function cartPanel(sum, anyEstimated, source) {
+function cartPanel(sum, anyEstimated, cart) {
+  const source = cart.source;
+  const instamart = cart.provider === "instamart";
   const parts = [`${sum.priced} priced`];
   if (sum.open) parts.push(`${sum.open} to price`);
   if (sum.haveN) parts.push(`${sum.haveN} you have`);
@@ -453,22 +545,169 @@ function cartPanel(sum, anyEstimated, source) {
     h("div", { class: "cart__counts" }, parts.join(" · ")),
     h("div", { class: "seg", "aria-hidden": "true" }, sum.rows.map((r) => h("i", { class: r.isHave ? "" : r.status === "priced" ? "priced" : "open" }))),
     h("div", { class: "cart__msg" }, msg),
-    h("button", { type: "button", class: "btn btn--ink", onClick: copyList }, "Copy shopping list"),
+    instamart
+      ? h("div", { class: "cart__actions" },
+          h("button", { type: "button", class: "btn btn--primary cart__go", disabled: state.reviewBusy || !sum.priced, onClick: reviewOrder }, state.reviewBusy ? "Checking..." : "Review order"),
+          h("button", { type: "button", class: "btn btn--link", onClick: copyList }, "Copy shopping list"))
+      : h("button", { type: "button", class: "btn btn--ink", onClick: copyList }, "Copy shopping list"),
+    instamart ? h("div", { class: "cart__badge" }, h("span", { class: "brandbar__logo", "aria-hidden": "true" }, "i"), cart.provider_badge || "Powered by Instamart") : null,
     h("div", { class: "cart__note" }, anyEstimated
       ? "Quantities marked in yellow came from the source and are estimates. Check them before you shop."
       : source === "dish" ? "Quantities are typical for this dish." : "Quantities were read from the source."));
+}
+
+// ---------- review and order (Instamart demo) ----------
+async function reviewOrder() {
+  const sum = summarize(state.cart.lines, state.have, state.swapped);
+  const items = orderItems(sum);
+  if (!items.length) { toast("Nothing to order yet."); return; }
+  state.reviewBusy = true; render();
+  const r = await postReview(items);
+  state.reviewBusy = false;
+  if (!r.ok) { toast(r.error); render(); return; }
+  const excluded = sum.rows.filter((x) => !x.isHave && x.status !== "priced").map((x) => x.name);
+  state.review = { data: r.data, items, excluded, method: (r.data.payment_methods[0] || {}).id || "Cash", error: "", placing: false };
+  state.view = "review"; history.pushState({ view: "review" }, ""); render(); window.scrollTo(0, 0);
+}
+function postReview(items) {
+  return request("/instamart/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) });
+}
+
+async function refreshReview() {
+  const rv = state.review; rv.placing = true; rv.error = ""; render();
+  const r = await postReview(rv.items);
+  rv.placing = false;
+  if (r.ok) { rv.data = r.data; rv.stale = false; if (!r.data.payment_methods.some((m) => m.id === rv.method)) rv.method = (r.data.payment_methods[0] || {}).id; }
+  else rv.error = r.error;
+  render();
+}
+
+async function placeOrder() {
+  const rv = state.review; rv.placing = true; rv.error = ""; render();
+  const r = await request("/instamart/checkout", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items: rv.items, payment_method: rv.method, to_pay: rv.data.to_pay, confirmed: true, address_id: rv.data.address.id }) });
+  rv.placing = false;
+  if (!r.ok) { rv.error = r.error; rv.stale = r.status === 409; render(); return; }
+  state.order = r.data; state.view = "done"; history.pushState({ view: "done" }, ""); render(); window.scrollTo(0, 0);
+  if (r.data.status === "pending_payment") pollPayment();
+}
+
+let payTimer;
+function pollPayment() {
+  clearTimeout(payTimer);
+  const o = state.order, started = Date.now();
+  const tick = async () => {
+    if (state.view !== "done" || state.order !== o) return;
+    const r = await request("/instamart/payment-status", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paas_id: o.paas_id, order_id: o.order_ids[0] }) });
+    if (state.order !== o) return;
+    if (!r.ok) { o.error = r.error; render(); return; }
+    if (r.data.status === "success") { state.order = Object.assign({}, o, { status: "placed", message: r.data.message }); render(); return; }
+    if (r.data.status === "failed") { o.status = "failed"; o.message = r.data.message; render(); return; }
+    if (Date.now() - started > (o.max_poll_ms || 20000)) { o.timedOut = true; render(); return; }
+    payTimer = setTimeout(tick, o.poll_interval_ms || 1500);
+  };
+  payTimer = setTimeout(tick, o.poll_interval_ms || 1500);
+}
+
+const money = (v) => (v == null || v === "" ? "" : String(v));
+
+function reviewView() {
+  const rv = state.review, d = rv.data;
+  const methodLabel = (d.payment_methods.find((m) => m.id === rv.method) || {}).label || rv.method;
+  const warnings = [...(d.warnings || []),
+    ...(d.removed_out_of_stock || []).map((n) => `${n} is out of stock and was removed.`),
+    ...(d.reduced || []).map((x) => `${x.itemName}: only ${x.cappedQuantity} allowed per order (you asked for ${x.requestedQuantity}).`)];
+
+  const items = h("div", { class: "rv__card" },
+    h("h2", { class: "rv__h" }, "Your items"),
+    h("ul", { class: "rv__items" }, d.items.map((i) => h("li", {},
+      h("div", {}, h("div", { class: "rv__name" }, i.name), h("div", { class: "rv__variant" }, `${i.variant} \u00d7 ${i.quantity}`.replace("\\u00d7", "×"))),
+      h("div", { class: "rv__price" }, i.unit_price == null ? "" : (i.unit_price * i.quantity).toFixed(2))))),
+    h("dl", { class: "rv__bill" }, ...d.bill_lines.flatMap((b) => [h("dt", {}, b.label), h("dd", {}, money(b.value))])),
+    h("div", { class: "rv__topay" }, h("span", {}, "To pay"), h("b", {}, money(d.to_pay))),
+    rv.excluded.length ? h("p", { class: "rv__excluded" }, `Not in this order (no product chosen): ${rv.excluded.join(", ")}.`) : null,
+    warnings.map((w) => h("div", { class: "alert" }, w)));
+
+  const pay = h("fieldset", { class: "rv__pay" },
+    h("legend", {}, "Payment"),
+    d.payment_methods.map((m) => h("label", { class: "pay" + (rv.method === m.id ? " pay--on" : "") },
+      h("input", { type: "radio", name: "pay", value: m.id, checked: rv.method === m.id, onChange: () => { rv.method = m.id; render(); } }), m.label)));
+
+  const confirmBox = h("aside", { class: "cart rv__confirm", "aria-label": "Confirm your order" },
+    h("div", { class: "eyebrow" }, "Delivery"),
+    h("div", { class: "rv__addr" }, h("b", {}, d.address.name || "Delivery address"), h("div", {}, d.address.line)),
+    pay,
+    h("p", { class: "rv__say" }, `Your order will be delivered to: ${d.address.line}. You'll pay ${money(d.to_pay)} by ${methodLabel}.`),
+    rv.error ? h("div", { class: "alert alert--error", role: "alert" }, rv.error) : null,
+    rv.stale
+      ? h("button", { type: "button", class: "btn btn--ink", disabled: rv.placing, onClick: refreshReview }, "Review the cart again")
+      : h("button", { type: "button", class: "btn btn--primary cart__go", disabled: rv.placing, onClick: placeOrder }, rv.placing ? "Placing..." : `Place order \u00b7 ${money(d.to_pay)}`.replace("\\u00b7", "·")),
+    h("button", { type: "button", class: "btn btn--link", onClick: () => { state.view = "recipe"; render(); window.scrollTo(0, 0); } }, "Back to ingredients"),
+    h("div", { class: "cart__badge" }, h("span", { class: "brandbar__logo", "aria-hidden": "true" }, "i"), d.badge));
+
+  return [
+    h("nav", { class: "steps", "aria-label": "Progress" },
+      h("span", { class: "done" }, "1 · Source ✓"), h("span", { class: "done" }, "2 · Ingredients ✓"), h("span", { class: "now" }, "3 · Review & order")),
+    h("section", { class: "head" }, h("div", { class: "head__title" }, h("h1", { class: "title" }, "Review your order"))),
+    h("div", { class: "alert demo-banner" }, h("strong", {}, "Demo mode. "), "This is a simulated Instamart: nothing here is real and no order will be placed."),
+    h("div", { class: "grid" }, h("div", { class: "grid__main" }, brandBar(state.cart), items), confirmBox),
+  ];
+}
+
+function doneView() {
+  const o = state.order;
+  const status = o.status;
+  const body = status === "pending_payment" ? [
+    h("h1", { class: "title" }, "Waiting for your payment"),
+    h("p", { class: "done__lede" }, `Pay ${money(o.total)} with UPI.`),
+    h("div", { class: "loading" }, h("div", { class: "loading__bar" }), h("div", { class: "loading__text" }, o.timedOut ? "This is taking longer than expected." : "Waiting for your payment...")),
+    h("p", { class: "done__note" }, "In the live app this opens Swiggy's payment page, where you scan a QR code or open your UPI app. In this demo the payment completes by itself in a few seconds."),
+    o.timedOut ? h("button", { type: "button", class: "btn btn--ink", onClick: () => { o.timedOut = false; render(); pollPayment(); } }, "Check again") : null,
+    o.error ? h("div", { class: "alert alert--error", role: "alert" }, o.error) : null,
+  ] : status === "failed" ? [
+    h("h1", { class: "title" }, "Payment didn't go through"),
+    h("div", { class: "alert alert--error", role: "alert" }, o.message || "No order was placed."),
+    h("button", { type: "button", class: "btn btn--ink", onClick: () => { state.view = "review"; render(); } }, "Back to your order"),
+  ] : [
+    h("div", { class: "done__tick", "aria-hidden": "true" }, icon("check", 36)),
+    h("h1", { class: "title" }, o.message || "Instamart order placed successfully."),
+    h("dl", { class: "done__facts" },
+      h("dt", {}, "Order"), h("dd", {}, (o.order_ids || []).join(", ")),
+      h("dt", {}, "Delivering to"), h("dd", {}, o.delivery_address || state.review.data.address.line),
+      h("dt", {}, "Paid by"), h("dd", {}, o.payment_method === "UPI" ? "UPI" : "Cash on delivery"),
+      h("dt", {}, "Total"), h("dd", {}, money(o.total))),
+    h("p", { class: "done__note" }, "Demo: no real order was placed. To cancel a real Instamart order, the customer calls Swiggy support."),
+    h("button", { type: "button", class: "btn btn--ink", onClick: backToStart }, "Plan another recipe"),
+  ];
+  return [
+    h("section", { class: "ordered" }, h("div", { class: "demo-pill" }, "Demo: simulated data"), body, h("div", { class: "cart__badge" }, h("span", { class: "brandbar__logo", "aria-hidden": "true" }, "i"), o.badge || "Powered by Instamart")),
+  ];
 }
 
 // ---------- render ----------
 function render() {
   const y = window.scrollY;
   const same = app.dataset.view === state.view;
-  app.replaceChildren(...(state.view === "start" ? startView() : recipeView()));
+  const views = { start: startView, recipe: recipeView, review: reviewView, done: doneView };
+  app.replaceChildren(...(views[state.view] || startView)());
   app.dataset.view = state.view;
   if (same) window.scrollTo(0, y);
   if (state.focus) { const el = document.querySelector(state.focus); if (el) el.focus(); state.focus = null; }
 }
 
-window.addEventListener("popstate", () => { if (state.view === "recipe") { state.view = "start"; render(); } });
-window.RC = { state, summarize, listText };   // handy for debugging in the console
-render();
+window.addEventListener("popstate", () => {
+  if (state.view === "done") { clearTimeout(payTimer); state.view = "start"; }
+  else if (state.view === "review") state.view = "recipe";
+  else if (state.view === "recipe") state.view = "start";
+  else return;
+  render();
+});
+window.RC = { state, summarize, listText, orderItems };   // handy for debugging in the console
+
+(async () => {
+  const r = await request("/api/config");
+  if (r.ok) state.config = r.data;
+  if (state.config.demo_instamart) { try { if (localStorage.getItem("rc.provider") === "instamart") state.provider = "instamart"; } catch { /* ignore */ } }
+  render();
+})();
