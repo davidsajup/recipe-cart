@@ -8,7 +8,7 @@ from sqlmodel import SQLModel
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
-from app import db  # noqa: E402  (registers the tables on SQLModel.metadata)
+from app import db, dishcache  # noqa: E402,F401  (register tables on SQLModel.metadata)
 
 config = context.config
 if config.config_file_name is not None:

@@ -37,6 +37,7 @@ class CartRequest(BaseModel):
     dish: str
     servings: int = Field(default=4, gt=0)
     pantry: list[str] = []
+    refresh: bool = False  # ignore the saved parse and ask the model again
 
 
 class Suggestion(BaseModel):

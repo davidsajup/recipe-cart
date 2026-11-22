@@ -12,8 +12,9 @@ from sqlmodel import Session  # noqa: E402
 
 from .admin import router as catalogue_router  # noqa: E402
 from .db import get_session, load_catalogue  # noqa: E402
+from .dishcache import parse_cached  # noqa: E402
 from .matcher import build_cart  # noqa: E402
-from .parser import parse_dish  # noqa: E402
+from .parser import current_model, is_builtin, parse_dish  # noqa: E402
 from .schemas import CartRequest, CartResponse, Product  # noqa: E402
 
 app = FastAPI(title="Recipe Cart")
@@ -43,9 +44,16 @@ def catalogue_page() -> FileResponse:
 
 
 @app.post("/cart", response_model=CartResponse)
-def create_cart(req: CartRequest, catalogue: list[Product] = Depends(get_catalogue)) -> CartResponse:
+def create_cart(
+    req: CartRequest,
+    catalogue: list[Product] = Depends(get_catalogue),
+    session: Session = Depends(get_session),
+) -> CartResponse:
     try:
-        parsed = parse_dish(req.dish)
+        parsed, _ = parse_cached(
+            session, req.dish, parse_dish,
+            refresh=req.refresh, is_builtin=is_builtin, model=current_model(),
+        )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

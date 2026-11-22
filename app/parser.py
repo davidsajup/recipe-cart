@@ -54,7 +54,7 @@ def gemini_complete(system: str, user: str) -> str:
         http_options=types.HttpOptions(timeout=30_000),  # ms; don't hang the UI
     )
     resp = client.models.generate_content(
-        model=os.environ.get("RECIPE_CART_MODEL", DEFAULT_MODEL),
+        model=current_model(),
         contents=user,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -68,6 +68,14 @@ def _extract_json(text: str) -> str:
     """Tolerate stray code fences / prose around the JSON object."""
     start, end = text.find("{"), text.rfind("}")
     return text[start : end + 1] if start != -1 and end > start else text
+
+
+def is_builtin(dish: str) -> bool:
+    return dish.lower().strip() in SAMPLES
+
+
+def current_model() -> str:
+    return os.environ.get("RECIPE_CART_MODEL", DEFAULT_MODEL)
 
 
 def parse_dish(dish: str, complete: Completer | None = None) -> ParsedDish:

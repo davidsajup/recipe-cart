@@ -74,6 +74,9 @@
         <input id="pantry" placeholder="salt, coconut oil" autocomplete="off">
         <div class="hint">Comma separated. These are left off the cart.</div>
       </div>
+      <div class="full">
+        <label style="font-weight:400"><input id="refresh" type="checkbox" style="width:auto;margin-right:6px">Re-ask the AI (ignore the saved version of this dish)</label>
+      </div>
       <div class="full"><button id="go" type="submit">Build cart</button></div>
     </form>
   </div>
@@ -155,6 +158,7 @@ form.addEventListener("submit", async (e) => {
         dish: $("dish").value.trim(),
         servings: parseInt($("servings").value, 10) || 4,
         pantry: $("pantry").value.split(",").map((s) => s.trim()).filter(Boolean),
+        refresh: $("refresh").checked,
       }),
     });
     const data = await res.json().catch(() => ({}));

@@ -24,6 +24,13 @@ Open http://127.0.0.1:8000 for the UI (API docs at /docs). "fish molee" works
 without a key; other dishes are parsed by Gemini (`RECIPE_CART_MODEL` in `.env`
 changes the model).
 
+## Dish cache
+Dishes parsed by Gemini are saved in the `parsed_dishes` table (keyed by the
+lower-cased dish name), so asking for the same dish again is instant and free;
+servings and pantry are applied after, so they never matter to the cache. Failed
+parses are never saved. If a saved parse looks wrong, tick "Re-ask the AI" in the
+UI (or send `"refresh": true` to `/cart`) to replace it.
+
 ## Substitutions
 When an ingredient isn't in the catalogue, `/cart` returns `suggestions`: stand-ins
 from the curated table in `app/substitutions.py` (ghee -> butter, lime -> lemon,
