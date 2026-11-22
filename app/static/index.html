@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recipe Cart</title>
+<style>
+  :root {
+    --bg: #faf8f5; --card: #ffffff; --ink: #1f2328; --muted: #6b7280;
+    --line: #e7e2d9; --accent: #c2410c; --accent-ink: #ffffff;
+    --ok: #166534; --warn: #92400e; --warn-bg: #fef3c7; --err-bg: #fee2e2; --err: #991b1b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17140f; --card: #211d16; --ink: #f1ece3; --muted: #a39b8b;
+      --line: #3a3429; --accent: #fb923c; --accent-ink: #1a1208;
+      --ok: #86efac; --warn: #fcd34d; --warn-bg: #3b2f0f; --err-bg: #3f1d1d; --err: #fca5a5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  form { display: grid; gap: 14px; grid-template-columns: 1fr 120px; }
+  .full { grid-column: 1 / -1; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  input { width: 100%; padding: 10px 12px; font: inherit; color: var(--ink);
+          background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  button { padding: 11px 18px; font: inherit; font-weight: 600; cursor: pointer;
+           background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; }
+  button:disabled { opacity: .6; cursor: progress; }
+  #result { margin-top: 24px; }
+  .banner { padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }
+  .banner.err { background: var(--err-bg); color: var(--err); }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .ing { font-weight: 600; text-transform: capitalize; }
+  .prod { color: var(--muted); font-size: 14px; }
+  tfoot td { border-bottom: 0; font-weight: 700; font-size: 18px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 14px; }
+  .tag { padding: 2px 10px; border-radius: 999px; font-size: 13px; border: 1px solid var(--line); }
+  h2 { font-size: 15px; margin: 18px 0 0; }
+  .subs { margin: 8px 0 0; padding-left: 20px; }
+  .subs li { margin-bottom: 8px; }
+  .subs strong { text-transform: capitalize; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Recipe Cart</h1>
+  <p class="sub">Name a dish, get a grocery cart. <a href="/catalogue" style="color:var(--accent)">Edit catalogue</a></p>
+
+  <div class="card">
+    <form id="form">
+      <div>
+        <label for="dish">Dish</label>
+        <input id="dish" required placeholder="e.g. fish molee, dal tadka" autocomplete="off">
+      </div>
+      <div>
+        <label for="servings">Servings</label>
+        <input id="servings" type="number" min="1" max="100" value="4" required>
+      </div>
+      <div class="full">
+        <label for="pantry">Already in your pantry</label>
+        <input id="pantry" placeholder="salt, coconut oil" autocomplete="off">
+        <div class="hint">Comma separated. These are left off the cart.</div>
+      </div>
+      <div class="full"><button id="go" type="submit">Build cart</button></div>
+    </form>
+  </div>
+
+  <div id="result" aria-live="polite"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const form = $("form"), go = $("go"), out = $("result");
+
+function el(tag, props = {}, ...kids) {
+  const n = Object.assign(document.createElement(tag), props);
+  for (const k of kids) n.append(k);
+  return n;
+}
+function banner(kind, text) {
+  out.replaceChildren(el("div", { className: "banner " + kind, textContent: text }));
+}
+function tags(list) {
+  return el("div", { className: "tags" }, ...list.map((t) => el("span", { className: "tag", textContent: t })));
+}
+
+function render(cart) {
+  out.replaceChildren();
+  const card = el("div", { className: "card" });
+  card.append(el("h2", { textContent: cart.dish, style: "margin-top:0;text-transform:capitalize" }));
+
+  if (cart.items.length) {
+    const rows = cart.items.map((i) => el("tr", {},
+      el("td", {}, el("div", { className: "ing", textContent: i.ingredient }),
+                   el("div", { className: "prod", textContent: "needs " + i.needed })),
+      el("td", { textContent: i.product }),
+      el("td", { className: "num", textContent: "× " + i.packs }),
+      el("td", { className: "num", textContent: i.price.toFixed(2) })));
+    const table = el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", { textContent: "Ingredient" }), el("th", { textContent: "Product" }),
+        el("th", { className: "num", textContent: "Packs" }), el("th", { className: "num", textContent: "Price" }))),
+      el("tbody", {}, ...rows),
+      el("tfoot", {}, el("tr", {},
+        el("td", { colSpan: 3, textContent: "Total" }),
+        el("td", { className: "num", textContent: cart.total.toFixed(2) }))));
+    card.append(el("div", { className: "scroll" }, table));
+  } else {
+    card.append(el("p", { textContent: "Nothing to buy." }));
+  }
+  if (cart.skipped_pantry.length) {
+    card.append(el("h2", { textContent: "Skipped (in your pantry)" }), tags(cart.skipped_pantry));
+  }
+  if (cart.unmatched.length) {
+    card.append(el("h2", { textContent: "Not in the catalogue - buy elsewhere" }), tags(cart.unmatched));
+  }
+  if (cart.suggestions && cart.suggestions.length) {
+    card.append(el("h2", { textContent: "Substitution ideas" }));
+    const list = el("ul", { className: "subs" });
+    for (const s of cart.suggestions) {
+      const what = s.in_pantry
+        ? s.product + " (you already have it)"
+        : s.product + " - " + s.packs + " pack" + (s.packs === 1 ? "" : "s") + ", " + s.price.toFixed(2);
+      list.append(el("li", {},
+        el("strong", { textContent: s.ingredient }), " → ", el("span", { textContent: what }),
+        el("div", { className: "prod", textContent: s.note })));
+    }
+    card.append(list);
+  }
+  out.append(card);
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  go.disabled = true; go.textContent = "Building...";
+  banner("warn", "Working out the ingredients...");
+  try {
+    const res = await fetch("/cart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dish: $("dish").value.trim(),
+        servings: parseInt($("servings").value, 10) || 4,
+        pantry: $("pantry").value.split(",").map((s) => s.trim()).filter(Boolean),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const d = data.detail;
+      banner("err", typeof d === "string" ? d : "Request failed (" + res.status + ").");
+    } else {
+      render(data);
+    }
+  } catch (err) {
+    banner("err", "Could not reach the server: " + err.message);
+  } finally {
+    go.disabled = false; go.textContent = "Build cart";
+  }
+});
+</script>
+</body>
+</html>
