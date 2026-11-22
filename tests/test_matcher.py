@@ -101,3 +101,47 @@ def test_falls_back_to_unit_compatible_product():
         dish="x", ingredients=[{"name": "coriander", "quantity": 2, "unit": "count"}]
     )
     assert build_cart(dish2, 4, [], CATALOGUE).items[0].product == "Coriander Leaves bunch"
+
+
+@pytest.mark.parametrize(
+    "amount,unit,expected",
+    [
+        (5, "ml", 50),  # tiny spice amounts still come in a real pack
+        (50, "g", 50),
+        (51, "g", 100),
+        (240, "ml", 250),
+        (600, "g", 1000),
+        (99999, "g", 5000),  # bigger than any listed size: largest shelf size
+        (1, "count", 1),
+        (2, "count", 6),
+        (8, "count", 12),
+        (40, "count", 12),
+    ],
+)
+def test_suggest_pack_size(amount, unit, expected):
+    from app.matcher import suggest_pack_size
+
+    assert suggest_pack_size(amount, unit) == expected
+
+
+def test_unmatched_items_say_what_is_needed_and_scale_with_servings():
+    dish = ParsedDish(
+        dish="x",
+        base_servings=2,
+        ingredients=[
+            {"name": "saffron", "quantity": 1, "unit": "tsp"},
+            {"name": "truffle", "quantity": 300, "unit": "g"},
+            {"name": "starfruit", "quantity": 2, "unit": "count"},
+        ],
+    )
+    cart = build_cart(dish, 4, [], CATALOGUE)  # 2x
+    got = {u.name: u for u in cart.unmatched_items}
+    assert cart.unmatched == ["saffron", "truffle", "starfruit"]
+    assert (got["saffron"].needed, got["saffron"].unit, got["saffron"].suggested_pack_size) == ("10.0 ml", "ml", 50)
+    assert (got["truffle"].needed, got["truffle"].suggested_pack_size) == ("600.0 g", 1000)
+    assert (got["starfruit"].unit, got["starfruit"].suggested_pack_size) == ("count", 6)
+
+
+def test_matched_ingredients_have_no_unmatched_item():
+    cart = build_cart(parse_dish("fish molee"), 4, [], CATALOGUE)
+    assert cart.unmatched == [] and cart.unmatched_items == []

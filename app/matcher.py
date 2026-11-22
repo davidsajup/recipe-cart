@@ -10,7 +10,7 @@ import re
 
 from rapidfuzz import fuzz
 
-from .schemas import CartItem, CartResponse, Ingredient, ParsedDish, Product, Suggestion
+from .schemas import CartItem, CartResponse, Ingredient, ParsedDish, Product, Suggestion, UnmatchedItem
 from .substitutions import SUBSTITUTES
 
 MAX_SUGGESTIONS = 3
@@ -139,6 +139,7 @@ def build_cart(
     items: list[CartItem] = []
     skipped: list[str] = []
     unmatched: list[str] = []
+    unmatched_items: list[UnmatchedItem] = []
     suggestions: list[Suggestion] = []
 
     for ing in parsed.ingredients:
@@ -150,6 +151,7 @@ def build_cart(
         item = _match_one(ing, scale, catalogue)
         if item is None:
             unmatched.append(ing.name)
+            unmatched_items.append(describe_unmatched(ing, scale))
             suggestions.extend(suggest(ing, scale, pantry, catalogue))
         else:
             items.append(item)
@@ -159,8 +161,30 @@ def build_cart(
         items=items,
         skipped_pantry=skipped,
         unmatched=unmatched,
+        unmatched_items=unmatched_items,
         suggestions=suggestions,
         total=round(sum(i.price for i in items), 2),
+    )
+
+
+PACK_SIZES = [50, 100, 200, 250, 500, 1000, 2000, 5000]  # typical shelf sizes for g / ml
+COUNT_PACKS = [1, 6, 12]
+
+
+def suggest_pack_size(amount: float, unit: str) -> float:
+    """A realistic pack size to offer when adding a product: the smallest usual size
+    that covers what the recipe needs (the user can change it)."""
+    sizes = COUNT_PACKS if unit == "count" else PACK_SIZES
+    return next((s for s in sizes if s >= amount - 1e-9), sizes[-1])
+
+
+def describe_unmatched(ing: Ingredient, scale: float) -> UnmatchedItem:
+    amount, unit = normalize(ing.quantity * scale, ing.unit)
+    return UnmatchedItem(
+        name=ing.name,
+        needed=f"{round(amount, 1)} {unit}",
+        unit=unit,
+        suggested_pack_size=suggest_pack_size(amount, unit),
     )
 
 

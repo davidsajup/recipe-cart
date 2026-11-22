@@ -50,11 +50,21 @@ class Suggestion(BaseModel):
     price: float = 0  # 0 when already in the pantry
 
 
+class UnmatchedItem(BaseModel):
+    """An ingredient the catalogue can't supply, with what's needed to add it."""
+
+    name: str
+    needed: str  # e.g. "600.0 g"
+    unit: Literal["g", "ml", "count"]
+    suggested_pack_size: float
+
+
 class CartResponse(BaseModel):
     dish: str
     items: list[CartItem]
     skipped_pantry: list[str]
     unmatched: list[str]
+    unmatched_items: list[UnmatchedItem] = []
     suggestions: list[Suggestion] = []
     source: Literal["dish", "instagram", "text", "video"] = "dish"
     total: float

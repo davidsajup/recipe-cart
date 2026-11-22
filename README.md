@@ -67,6 +67,13 @@ ever passed to yt-dlp, restricted to its Instagram extractor. Uploaded/downloade
 sent to Google Gemini; tell your users. Beta limits: 2 media jobs at once and
 `VIDEO_MAX_PER_DAY` (default 30) per process, in memory only.
 
+## Adding missing ingredients
+Ingredients the catalogue can't supply are listed under the cart with what's needed and an
+"Add to catalogue" button. It opens a form prefilled with a name, a realistic pack size
+(the smallest usual shelf size that covers the recipe) and the unit; you enter the price,
+and the cart rebuilds with the new product included (from the saved recipe, no new AI
+call). If `ADMIN_TOKEN` is set, the page asks for it once per browser session.
+
 ## Substitutions
 When an ingredient isn't in the catalogue, `/cart` returns `suggestions`: stand-ins
 from the curated table in `app/substitutions.py` (ghee -> butter, lime -> lemon,

@@ -34,3 +34,20 @@ def test_empty_catalogue_gives_503(client_factory, engine):
     r = client_factory(engine).post("/cart", json={"dish": "fish molee"})
     assert r.status_code == 503
     assert "app.seed" in r.json()["detail"]
+
+
+def test_cart_reports_what_each_unmatched_ingredient_needs(client_factory, seeded_engine, monkeypatch):
+    """The UI's one-click 'add to catalogue' is prefilled from unmatched_items."""
+    import app.main as main
+    from app.schemas import ParsedDish
+
+    monkeypatch.setattr(main, "parse_dish", lambda d: ParsedDish.model_validate({
+        "dish": "x", "base_servings": 2,
+        "ingredients": [{"name": "saffron", "quantity": 1, "unit": "tsp"}],
+    }))
+    monkeypatch.setattr(main, "is_builtin", lambda d: False)
+    body = client_factory(seeded_engine).post("/cart", json={"dish": "x", "servings": 4}).json()
+    assert body["unmatched"] == ["saffron"]
+    assert body["unmatched_items"] == [
+        {"name": "saffron", "needed": "10.0 ml", "unit": "ml", "suggested_pack_size": 50.0}
+    ]
