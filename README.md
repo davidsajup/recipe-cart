@@ -31,6 +31,10 @@ servings and pantry are applied after, so they never matter to the cache. Failed
 parses are never saved. If a saved parse looks wrong, tick "Re-ask the AI" in the
 UI (or send `"refresh": true` to `/cart`) to replace it.
 
+Gemini calls are retried up to 3 times (1 s, then 3 s backoff) on overload,
+rate-limit, server errors, timeouts and dropped connections; bad keys or model
+names fail immediately.
+
 ## Substitutions
 When an ingredient isn't in the catalogue, `/cart` returns `suggestions`: stand-ins
 from the curated table in `app/substitutions.py` (ghee -> butter, lime -> lemon,

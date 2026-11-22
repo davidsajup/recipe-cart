@@ -5,6 +5,8 @@ JSON matching ParsedDish. Output is validated and retried once on failure.
 """
 import json
 import os
+import random
+import time
 from typing import Callable
 
 from pydantic import ValidationError
@@ -43,6 +45,36 @@ SAMPLES = {
 }
 
 
+TRANSIENT_CODES = {429, 500, 502, 503, 504}
+RETRY_DELAYS = (1.0, 3.0)  # seconds before retry 1 and 2 -> up to 3 attempts
+
+
+def is_transient(exc: Exception) -> bool:
+    """Worth retrying: overload/rate limit/server errors, timeouts, dropped connections.
+    A bad key (400/403), unknown model (404) etc. fail immediately."""
+    if getattr(exc, "code", None) in TRANSIENT_CODES:
+        return True
+    import httpx
+
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+def call_with_retry(
+    fn: Callable[[], str],
+    delays: tuple[float, ...] = RETRY_DELAYS,
+    sleep: Callable[[float], None] | None = None,
+) -> str:
+    sleep = sleep or time.sleep  # looked up at call time so tests can patch it
+    for delay in delays:
+        try:
+            return fn()
+        except Exception as e:
+            if not is_transient(e):
+                raise
+            sleep(delay + random.uniform(0, delay * 0.25))  # jitter
+    return fn()  # final attempt: let any error propagate
+
+
 def gemini_complete(system: str, user: str) -> str:
     from google import genai  # lazy: tests/samples work without a key
     from google.genai import types
@@ -51,17 +83,20 @@ def gemini_complete(system: str, user: str) -> str:
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=30_000),  # ms; don't hang the UI
+        http_options=types.HttpOptions(timeout=20_000),  # ms; don't hang the UI
     )
-    resp = client.models.generate_content(
-        model=current_model(),
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            response_mime_type="application/json",
-        ),
-    )
-    return resp.text or ""
+    def call() -> str:
+        resp = client.models.generate_content(
+            model=current_model(),
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+            ),
+        )
+        return resp.text or ""
+
+    return call_with_retry(call)
 
 
 def _extract_json(text: str) -> str:
